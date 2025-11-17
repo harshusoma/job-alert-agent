@@ -1,0 +1,52 @@
+[
+  {
+    "name": "Snowflake",
+    "ats": "workday",
+    "careers_url": "https://careers.snowflake.com/us/en/search-results"
+  },
+  {
+    "name": "CrowdStrike",
+    "ats": "lever",
+    "careers_url": "https://api.lever.co/v0/postings/crowdstrike"
+  },
+  {
+    "name": "Databricks",
+    "ats": "greenhouse",
+    "careers_url": "https://boards.greenhouse.io/databricks"
+  },
+  {
+    "name": "Stripe",
+    "ats": "greenhouse",
+    "careers_url": "https://boards.greenhouse.io/stripe"
+  },
+  {
+    "name": "Coinbase",
+    "ats": "greenhouse",
+    "careers_url": "https://boards.greenhouse.io/coinbase"
+  },
+  {
+    "name": "Rippling",
+    "ats": "lever",
+    "careers_url": "https://api.lever.co/v0/postings/rippling"
+  },
+  {
+    "name": "Anthropic",
+    "ats": "greenhouse",
+    "careers_url": "https://boards.greenhouse.io/anthropic"
+  },
+  {
+    "name": "OpenAI",
+    "ats": "ashby",
+    "careers_url": "https://openai.com/careers/search"
+  },
+  {
+    "name": "Northrop Grumman",
+    "ats": "workday",
+    "careers_url": "https://careers.northropgrumman.com/en-us/search-results"
+  },
+  {
+    "name": "Capital One",
+    "ats": "workday",
+    "careers_url": "https://www.capitalonecareers.com/search-jobs"
+  }
+]
