@@ -7,9 +7,6 @@ from scrapers.lever import fetch_lever_jobs
 from scrapers.workday import fetch_workday_jobs
 
 
-# -------------------------------
-# FILTERING CONFIG
-# -------------------------------
 TARGET_ROLES = [
     "software engineer",
     "ml engineer",
@@ -30,54 +27,39 @@ EXPERIENCE_KEYWORDS = [
 LOCATION_KEYWORDS = ["us", "usa", "united states", "u.s."]
 
 
-# -------------------------------
-# LOAD COMPANIES
-# -------------------------------
 def load_companies():
-    print("[DEBUG] Loading company list from config/companies.json")
+    print("[INFO] Loading companies.json...")
     with open("config/companies.json") as f:
-        return json.load(f)
+        data = json.load(f)
+    print(f"[INFO] Loaded {len(data)} companies.")
+    return data
 
 
-# -------------------------------
-# JOB FILTER CHECK
-# -------------------------------
 def job_matches(job):
     text = (job.get("title", "") + " " + job.get("description", "")).lower()
     loc = job.get("location", "").lower()
 
-    if not any(role in text for role in TARGET_ROLES):
-        return False
-
-    if not any(exp in text for exp in EXPERIENCE_KEYWORDS):
-        return False
-
-    if not any(loc_kw in loc for loc_kw in LOCATION_KEYWORDS):
-        return False
-
-    return True
+    return (
+        any(role in text for role in TARGET_ROLES) and
+        any(exp in text for exp in EXPERIENCE_KEYWORDS) and
+        any(loc_kw in loc for loc_kw in LOCATION_KEYWORDS)
+    )
 
 
-# -------------------------------
-# UNIQUE JOB HASH
-# -------------------------------
 def job_id(company, job):
     base = f"{company}|{job['title']}|{job['url']}"
     return hashlib.md5(base.encode()).hexdigest()
 
 
-# -------------------------------
-# EMAIL SENDER
-# -------------------------------
 def send_email(new_jobs):
     import smtplib
     from email.mime.text import MIMEText
 
     if not new_jobs:
-        print("[EMAIL] No new jobs. Email not sent.")
+        print("[INFO] No new jobs found — not sending email.")
         return
 
-    print(f"[EMAIL] Sending email for {len(new_jobs)} new jobs")
+    print(f"[INFO] Sending email with {len(new_jobs)} new jobs...")
 
     body = ""
     for j in new_jobs:
@@ -92,18 +74,17 @@ def send_email(new_jobs):
         server.login("somaharsha71@gmail.com", "xzrs dgan dgdh noke")
         server.send_message(msg)
 
+    print("[INFO] Email sent successfully.")
 
-# -------------------------------
-# MAIN CLOUD FUNCTION
-# -------------------------------
+
 def main(request=None):
-    print("[SYSTEM] Job Alert Agent started")
+    print("\n======== JOB ALERT AGENT STARTED ========\n")
 
     db = firestore.Client()
-    companies = load_companies()
 
+    companies = load_companies()
     seen = {doc.id for doc in db.collection("jobs_seen").stream()}
-    print(f"[DEBUG] Loaded {len(seen)} previously seen jobs from Firestore")
+    print(f"[INFO] Loaded {len(seen)} previously seen job IDs.\n")
 
     new_jobs = []
 
@@ -112,9 +93,8 @@ def main(request=None):
         ats = company["ats"]
         url = company["careers_url"]
 
-        print(f"\n[FETCH] Fetching jobs for {name} ({ats}) → {url}")
+        print(f"\n[INFO] Fetching jobs for: {name} ({ats})")
 
-        # SELECT SCRAPER
         if ats == "greenhouse":
             jobs = fetch_greenhouse_jobs(name, url)
         elif ats == "lever":
@@ -122,20 +102,16 @@ def main(request=None):
         elif ats == "workday":
             jobs = fetch_workday_jobs(name, url)
         else:
+            print(f"[WARN] Unsupported ATS: {ats}")
             jobs = []
 
-        print(f"[DEBUG] Scraper for {name} returned {len(jobs)} jobs")
-
-        # PROCESS JOBS
-        matched_count = 0
+        print(f"[INFO] {name}: scraper returned {len(jobs)} jobs.")
 
         for job in jobs:
             if not job_matches(job):
                 continue
 
-            matched_count += 1
             jid = job_id(name, job)
-
             if jid in seen:
                 continue
 
@@ -149,13 +125,10 @@ def main(request=None):
             db.collection("jobs_seen").document(jid).set(record)
             new_jobs.append(record)
 
-            print(f"[NEW] {name} → {record['title']} ({record['location']})")
+        print(f"[INFO] {name}: {len(new_jobs)} total new jobs accumulated so far.")
 
-        print(f"[DEBUG] {name}: {matched_count} jobs matched filters")
-
-    print(f"\n[SUMMARY] Total new jobs added this run: {len(new_jobs)}")
-
+    print(f"\n[INFO] FINAL: Found {len(new_jobs)} new jobs.")
     send_email(new_jobs)
-    print("[SYSTEM] Job Alert Agent completed")
 
+    print("\n======== JOB ALERT AGENT FINISHED ========\n")
     return "OK"
