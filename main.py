@@ -7,6 +7,9 @@ from scrapers.lever import fetch_lever_jobs
 from scrapers.workday import fetch_workday_jobs
 
 
+# -------------------------------
+# FILTERING CONFIG
+# -------------------------------
 TARGET_ROLES = [
     "software engineer",
     "ml engineer",
@@ -27,6 +30,9 @@ EXPERIENCE_KEYWORDS = [
 LOCATION_KEYWORDS = ["us", "usa", "united states", "u.s."]
 
 
+# -------------------------------
+# LOAD COMPANIES
+# -------------------------------
 def load_companies():
     print("[INFO] Loading companies.json...")
     with open("config/companies.json") as f:
@@ -35,6 +41,9 @@ def load_companies():
     return data
 
 
+# -------------------------------
+# JOB FILTER CHECK
+# -------------------------------
 def job_matches(job):
     text = (job.get("title", "") + " " + job.get("description", "")).lower()
     loc = job.get("location", "").lower()
@@ -46,11 +55,17 @@ def job_matches(job):
     )
 
 
+# -------------------------------
+# UNIQUE JOB HASH
+# -------------------------------
 def job_id(company, job):
     base = f"{company}|{job['title']}|{job['url']}"
     return hashlib.md5(base.encode()).hexdigest()
 
 
+# -------------------------------
+# EMAIL SENDER
+# -------------------------------
 def send_email(new_jobs):
     import smtplib
     from email.mime.text import MIMEText
@@ -77,15 +92,18 @@ def send_email(new_jobs):
     print("[INFO] Email sent successfully.")
 
 
+# -------------------------------
+# MAIN (DEV MODE — Firestore disabled)
+# -------------------------------
 def main(request=None):
     print("\n======== JOB ALERT AGENT STARTED ========\n")
 
-    db = firestore.Client()
+    # 🔥 DEV MODE: Firestore disabled to avoid authentication failure
+    print("[INFO] Firestore DISABLED — running in development mode.")
+    db = None
+    seen = set()  # no previous job caching
 
     companies = load_companies()
-    seen = {doc.id for doc in db.collection("jobs_seen").stream()}
-    print(f"[INFO] Loaded {len(seen)} previously seen job IDs.\n")
-
     new_jobs = []
 
     for company in companies:
@@ -95,6 +113,7 @@ def main(request=None):
 
         print(f"\n[INFO] Fetching jobs for: {name} ({ats})")
 
+        # Select scraper
         if ats == "greenhouse":
             jobs = fetch_greenhouse_jobs(name, url)
         elif ats == "lever":
@@ -122,7 +141,9 @@ def main(request=None):
                 "url": job["url"]
             }
 
-            db.collection("jobs_seen").document(jid).set(record)
+            # 🔥 DEV MODE: Firestore write disabled
+            print(f"[DEBUG] (DEV MODE) Would save job to Firestore: {jid}")
+
             new_jobs.append(record)
 
         print(f"[INFO] {name}: {len(new_jobs)} total new jobs accumulated so far.")
@@ -133,5 +154,7 @@ def main(request=None):
     print("\n======== JOB ALERT AGENT FINISHED ========\n")
     return "OK"
 
+
 if __name__ == "__main__":
     main()
+
