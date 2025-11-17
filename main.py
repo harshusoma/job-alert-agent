@@ -132,3 +132,6 @@ def main(request=None):
 
     print("\n======== JOB ALERT AGENT FINISHED ========\n")
     return "OK"
+
+if __name__ == "__main__":
+    main()
