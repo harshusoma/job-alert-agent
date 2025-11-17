@@ -1,13 +1,9 @@
+# scrapers/greenhouse.py
+
 import requests
 
 
 def _extract_board_token(url: str) -> str:
-    """
-    For URLs like:
-      - https://boards.greenhouse.io/databricks
-      - https://boards.greenhouse.io/databricks/
-    return "databricks".
-    """
     return url.rstrip("/").split("/")[-1]
 
 
@@ -17,20 +13,21 @@ def fetch_greenhouse_jobs(company: str, careers_url: str):
     api_url = f"https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs?content=true"
 
     try:
-        resp = requests.get(api_url, timeout=15)
+        resp = requests.get(api_url, timeout=20)
         resp.raise_for_status()
         data = resp.json()
-        raw_jobs = data.get("jobs", [])
-        print(f"[GREENHOUSE] API returned {len(raw_jobs)} jobs for {company}")
 
-        for j in raw_jobs:
+        raw = data.get("jobs", [])
+        print(f"[GREENHOUSE] API returned {len(raw)} jobs for {company}")
+
+        for j in raw:
             jobs.append(
                 {
-                    "title": j.get("title", ""),
+                    "title": j.get("title") or "",
                     "company": company,
-                    "location": j.get("location", {}).get("name", "") or "",
-                    "url": j.get("absolute_url", "") or "",
-                    "description": j.get("content", "") or "",
+                    "location": (j.get("location") or {}).get("name", "") or "",
+                    "url": j.get("absolute_url") or "",
+                    "description": j.get("content") or "",
                     "created_at": j.get("created_at"),
                     "updated_at": j.get("updated_at"),
                 }
