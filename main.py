@@ -1,21 +1,29 @@
 import os
 import json
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
-from google.cloud import firestore
+# Firestore (disabled automatically in GitHub Actions)
+try:
+    from google.cloud import firestore
+    FIRESTORE_AVAILABLE = True
+except Exception:
+    FIRESTORE_AVAILABLE = False
 
+# Scrapers
 from scrapers.greenhouse import fetch_greenhouse_jobs
 from scrapers.lever import fetch_lever_jobs
 from scrapers.workday import fetch_workday_jobs
+from scrapers.ashby import fetch_ashby_jobs
 
 
-# -------------------------------
-# FILTERING CONFIG
-# -------------------------------
+# ============================================
+#  FILTER CONFIG
+# ============================================
+
 TARGET_ROLES = [
     "software engineer",
-    "software developer",
+    "associate software engineer",
     "ml engineer",
     "machine learning engineer",
     "ai engineer",
@@ -24,9 +32,11 @@ TARGET_ROLES = [
     "security engineer",
     "cybersecurity",
     "security analyst",
+    "early career",
+    "associate",
+    "assistant",
 ]
 
-# Junior / early-career signals
 EXPERIENCE_KEYWORDS = [
     "entry level",
     "new grad",
@@ -37,209 +47,147 @@ EXPERIENCE_KEYWORDS = [
     "assistant",
 ]
 
-# Titles / descriptions we want to EXCLUDE
-EXCLUDE_KEYWORDS = [
-    "senior", " sr ", " sr.", "sr-",
-    "staff",
-    "principal",
-    "lead",
-    "director",
-    "vp ", "vice president",
-    "architect",
-    "manager",
-    "head of",
-    "intern", "internship", "co-op", "co op",
-    "fellowship",
-]
+# Exclude internships
+EXCLUDE_KEYWORDS = ["intern", "internship", "co-op"]
 
-# Location INCLUDE and EXCLUDE lists
-LOCATION_INCLUDE = [
-    " us", " usa", " u.s.", " united states",
-    "(us)", "(usa)",
-    "remote us", "remote-us", "remote in the us", "remote in usa",
-    "anywhere in the us", "us only",
-    "hybrid", "hybrid-us", "hybrid us",
-    "onsite", "on-site", "in office", "in-office",
-]
-
-LOCATION_EXCLUDE = [
-    "canada", "toronto", "vancouver",
-    "europe", " eu ", "emea",
-    "united kingdom", "uk", "london",
-    "india", "bangalore", "bengaluru", "hyderabad", "gurgaon", "mumbai", "pune",
-    "mexico", "latam", "latin america",
-    "australia", "sydney", "melbourne",
-    "singapore", "hong kong", "china",
-    "worldwide", "global",
-    "remote global", "remote worldwide",
+LOCATION_KEYWORDS = [
+    "us",
+    "usa",
+    "u.s.",
+    "united states",
+    "remote",
+    "remote-us",
+    "remote us",
+    "anywhere in the us",
+    "us only",
+    "hybrid",
 ]
 
 
-# -------------------------------
-# LOAD COMPANIES
-# -------------------------------
+# ============================================
+#  LOAD COMPANIES
+# ============================================
+
 def load_companies():
     print("[INFO] Loading companies.json...")
-    with open("config/companies.json", encoding="utf-8") as f:
+    with open("config/companies.json") as f:
         data = json.load(f)
     print(f"[INFO] Loaded {len(data)} companies.")
     return data
 
 
-# -------------------------------
-# FILTER BY POSTING AGE (30 MIN)
-# -------------------------------
+# ============================================
+#  JOB FILTERING
+# ============================================
+
 def posted_within(job, minutes=30):
     """
-    Accepts job dict with `created_at` / `updated_at` (ISO8601 strings).
-    Returns True if within the last `minutes`.
+    job["posted"] should be an ISO datetime string.
+    Greenhouse has "updated_at" → ISO format.
     """
-    updated = job.get("updated_at")
-    created = job.get("created_at")
-
-    timestamp = updated or created
-    if not timestamp:
-        return False  # no timestamp => ignore
+    if "posted" not in job:
+        return False
 
     try:
-        dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-    except Exception:
+        posted_time = datetime.fromisoformat(job["posted"].replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        return (now - posted_time) <= timedelta(minutes=minutes)
+    except:
         return False
 
-    now = datetime.now(timezone.utc)
-    diff_min = (now - dt).total_seconds() / 60.0
-    return diff_min <= minutes
 
-
-# -------------------------------
-# JOB FILTER CHECK
-# -------------------------------
 def job_matches(job):
-    title = job.get("title", "") or ""
-    desc = job.get("description", "") or ""
-    loc = job.get("location", "") or ""
+    title = job.get("title", "").lower()
+    desc = job.get("description", "").lower()
+    loc = job.get("location", "").lower()
 
-    text = (title + " " + desc).lower()
-    loc_low = loc.lower()
+    full_text = f"{title} {desc}"
 
-    # 1) Exclude clearly senior / non-junior / intern roles
-    if any(bad in text for bad in EXCLUDE_KEYWORDS):
+    # Must match target titles
+    if not any(role in full_text for role in TARGET_ROLES):
         return False
 
-    # 2) Require at least one junior / early-career signal
-    if not any(exp in text for exp in EXPERIENCE_KEYWORDS):
+    # Must match junior experience
+    if not any(exp in full_text for exp in EXPERIENCE_KEYWORDS):
         return False
 
-    # 3) Require target role keywords
-    if not any(role in text for role in TARGET_ROLES):
+    # Exclude internships
+    if any(bad in full_text for bad in EXCLUDE_KEYWORDS):
         return False
 
-    # 4) Location must NOT contain non-US markers
-    if any(bad in loc_low for bad in LOCATION_EXCLUDE):
+    # Location must match US filters
+    if not any(loc_kw in loc for loc_kw in LOCATION_KEYWORDS):
         return False
 
-    # 5) Location must look like US / US-remote / US-hybrid / onsite US
-    if not any(ok in loc_low for ok in LOCATION_INCLUDE):
-        # As a fallback, accept locations that explicitly mention US states
-        us_states = [
-            "california", "ca", "new york", "ny",
-            "texas", "tx", "washington", "wa",
-            "massachusetts", "ma", "virginia", "va",
-            "colorado", "co", "illinois", "il",
-            "georgia", "ga", "north carolina", "nc",
-            "ohio", "oh", "arizona", "az",
-            "florida", "fl", "pennsylvania", "pa",
-        ]
-        if not any(state in loc_low for state in us_states):
-            return False
-
-    # 6) Must be posted within last 30 minutes
+    # Must be fresh (last 30 min)
     if not posted_within(job, minutes=30):
         return False
 
     return True
 
 
-# -------------------------------
-# UNIQUE JOB HASH
-# -------------------------------
+# ============================================
+#  DEDUPING
+# ============================================
+
 def job_id(company, job):
-    base = f"{company}|{job.get('title','')}|{job.get('url','')}"
-    return hashlib.md5(base.encode(), usedforsecurity=False).hexdigest()
+    base = f"{company}|{job['title']}|{job['url']}"
+    return hashlib.md5(base.encode()).hexdigest()
 
 
-# -------------------------------
-# EMAIL SENDER (uses env/Secrets)
-# -------------------------------
+# ============================================
+#  EMAIL SENDER
+# ============================================
+
 def send_email(new_jobs):
     import smtplib
     from email.mime.text import MIMEText
 
     if not new_jobs:
-        print("[INFO] No new jobs found — not sending email.")
+        print("[INFO] No new jobs — skipping email.")
         return
 
-    email_address = os.environ.get("EMAIL_ADDRESS")
-    email_password = os.environ.get("EMAIL_PASSWORD")
+    print(f"[INFO] Sending email with {len(new_jobs)} jobs...")
 
-    if not email_address or not email_password:
-        print(
-            "[WARN] EMAIL_ADDRESS or EMAIL_PASSWORD not set — "
-            "skipping email send. Jobs will be printed instead."
-        )
-        for j in new_jobs:
-            print(f"JOB: {j['title']} — {j['company']} — {j['location']} | {j['url']}")
-        return
-
-    print(f"[INFO] Sending email with {len(new_jobs)} new jobs...")
-
-    lines = []
+    body = ""
     for j in new_jobs:
-        lines.append(f"{j['title']} — {j['company']} — {j['location']}")
-        lines.append(j["url"])
-        lines.append("")
-    body = "\n".join(lines)
+        body += f"{j['title']} — {j['company']}\n{j['url']}\n\n"
 
     msg = MIMEText(body)
-    msg["Subject"] = f"{len(new_jobs)} New Junior Jobs (Last 30 Minutes)"
-    msg["From"] = email_address
-    msg["To"] = email_address
+    msg["Subject"] = f"{len(new_jobs)} New Jobs Found"
+    msg["From"] = os.getenv("EMAIL_ADDRESS")
+    msg["To"] = os.getenv("EMAIL_ADDRESS")
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(email_address, email_password)
+        server.login(os.getenv("EMAIL_ADDRESS"), os.getenv("EMAIL_PASSWORD"))
         server.send_message(msg)
 
     print("[INFO] Email sent successfully.")
 
 
-# -------------------------------
-# FIRESTORE (optional)
-# -------------------------------
-def get_firestore_client():
-    try:
-        db = firestore.Client()
-        print("[INFO] Firestore ENABLED.")
-        return db
-    except Exception as e:
-        print(f"[INFO] Firestore DISABLED — running in dev mode. Reason: {e}")
-        return None
+# ============================================
+#  MAIN ENTRY
+# ============================================
 
-
-# -------------------------------
-# MAIN FUNCTION
-# -------------------------------
 def main(request=None):
     print("\n======== JOB ALERT AGENT STARTED ========\n")
 
-    db = get_firestore_client()
+    # Firestore disabled in GitHub Actions
+    if FIRESTORE_AVAILABLE:
+        try:
+            db = firestore.Client()
+            seen = {doc.id for doc in db.collection("jobs_seen").stream()}
+            print(f"[INFO] Firestore ENABLED. Loaded {len(seen)} seen job IDs.")
+        except Exception as e:
+            print(f"[INFO] Firestore DISABLED — running in dev mode. Reason: {e}")
+            db = None
+            seen = set()
+    else:
+        print("[INFO] Firestore not available — dev mode ON.")
+        db = None
+        seen = set()
+
     companies = load_companies()
-
-    seen = set()
-    if db:
-        seen = {doc.id for doc in db.collection("jobs_seen").stream()}
-
-    print(f"[INFO] Loaded {len(seen)} previously seen job IDs.\n")
-
     new_jobs = []
 
     for company in companies:
@@ -255,6 +203,8 @@ def main(request=None):
             jobs = fetch_lever_jobs(name, url)
         elif ats == "workday":
             jobs = fetch_workday_jobs(name, url)
+        elif ats == "ashby":
+            jobs = fetch_ashby_jobs(name, url)
         else:
             print(f"[WARN] Unsupported ATS: {ats}")
             jobs = []
@@ -271,17 +221,16 @@ def main(request=None):
 
             record = {
                 "company": name,
-                "title": job.get("title", ""),
-                "location": job.get("location", ""),
-                "url": job.get("url", ""),
+                "title": job["title"],
+                "location": job["location"],
+                "url": job["url"],
+                "posted": job["posted"],
             }
 
             if db:
                 db.collection("jobs_seen").document(jid).set(record)
-            seen.add(jid)
-            new_jobs.append(record)
 
-        print(f"[INFO] {name}: {len(new_jobs)} total new jobs accumulated so far.")
+            new_jobs.append(record)
 
     print(f"\n[INFO] FINAL: Found {len(new_jobs)} new jobs.")
     send_email(new_jobs)
