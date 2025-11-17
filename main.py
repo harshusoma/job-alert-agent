@@ -34,6 +34,7 @@ LOCATION_KEYWORDS = ["us", "usa", "united states", "u.s."]
 # LOAD COMPANIES
 # -------------------------------
 def load_companies():
+    print("[DEBUG] Loading company list from config/companies.json")
     with open("config/companies.json") as f:
         return json.load(f)
 
@@ -73,7 +74,10 @@ def send_email(new_jobs):
     from email.mime.text import MIMEText
 
     if not new_jobs:
+        print("[EMAIL] No new jobs. Email not sent.")
         return
+
+    print(f"[EMAIL] Sending email for {len(new_jobs)} new jobs")
 
     body = ""
     for j in new_jobs:
@@ -93,16 +97,22 @@ def send_email(new_jobs):
 # MAIN CLOUD FUNCTION
 # -------------------------------
 def main(request=None):
+    print("[SYSTEM] Job Alert Agent started")
+
     db = firestore.Client()
     companies = load_companies()
 
     seen = {doc.id for doc in db.collection("jobs_seen").stream()}
+    print(f"[DEBUG] Loaded {len(seen)} previously seen jobs from Firestore")
+
     new_jobs = []
 
     for company in companies:
         name = company["name"]
         ats = company["ats"]
         url = company["careers_url"]
+
+        print(f"\n[FETCH] Fetching jobs for {name} ({ats}) → {url}")
 
         # SELECT SCRAPER
         if ats == "greenhouse":
@@ -114,12 +124,18 @@ def main(request=None):
         else:
             jobs = []
 
+        print(f"[DEBUG] Scraper for {name} returned {len(jobs)} jobs")
+
         # PROCESS JOBS
+        matched_count = 0
+
         for job in jobs:
             if not job_matches(job):
                 continue
 
+            matched_count += 1
             jid = job_id(name, job)
+
             if jid in seen:
                 continue
 
@@ -133,5 +149,13 @@ def main(request=None):
             db.collection("jobs_seen").document(jid).set(record)
             new_jobs.append(record)
 
+            print(f"[NEW] {name} → {record['title']} ({record['location']})")
+
+        print(f"[DEBUG] {name}: {matched_count} jobs matched filters")
+
+    print(f"\n[SUMMARY] Total new jobs added this run: {len(new_jobs)}")
+
     send_email(new_jobs)
+    print("[SYSTEM] Job Alert Agent completed")
+
     return "OK"
