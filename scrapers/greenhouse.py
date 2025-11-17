@@ -12,7 +12,7 @@ def _extract_board_token(url: str) -> str:
 
 
 def fetch_greenhouse_jobs(company: str, careers_url: str):
-    jobs: list[dict] = []
+    jobs = []
     board_token = _extract_board_token(careers_url)
     api_url = f"https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs?content=true"
 
@@ -28,9 +28,11 @@ def fetch_greenhouse_jobs(company: str, careers_url: str):
                 {
                     "title": j.get("title", ""),
                     "company": company,
-                    "location": j.get("location", {}).get("name", ""),
-                    "url": j.get("absolute_url", ""),
+                    "location": j.get("location", {}).get("name", "") or "",
+                    "url": j.get("absolute_url", "") or "",
                     "description": j.get("content", "") or "",
+                    "created_at": j.get("created_at"),
+                    "updated_at": j.get("updated_at"),
                 }
             )
 

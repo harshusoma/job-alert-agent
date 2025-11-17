@@ -1,3 +1,4 @@
+import os
 import json
 import hashlib
 from datetime import datetime, timezone
@@ -14,6 +15,7 @@ from scrapers.workday import fetch_workday_jobs
 # -------------------------------
 TARGET_ROLES = [
     "software engineer",
+    "software developer",
     "ml engineer",
     "machine learning engineer",
     "ai engineer",
@@ -21,23 +23,56 @@ TARGET_ROLES = [
     "data engineer",
     "security engineer",
     "cybersecurity",
-    "security analyst"
+    "security analyst",
 ]
 
+# Junior / early-career signals
 EXPERIENCE_KEYWORDS = [
-    "0-2 years", "0–2 years", "0 to 2 years",
-    "entry level", "new grad", "graduate", "junior"
+    "entry level",
+    "new grad",
+    "graduate",
+    "junior",
+    "early career",
+    "associate",
+    "assistant",
 ]
 
+# Titles / descriptions we want to EXCLUDE
 EXCLUDE_KEYWORDS = [
-    "senior", "sr ", "sr.", "staff",
-    "principal", "lead",
-    "director", "architect",
-    "manager", "head",
-    "intern", "internship", "co-op"
+    "senior", " sr ", " sr.", "sr-",
+    "staff",
+    "principal",
+    "lead",
+    "director",
+    "vp ", "vice president",
+    "architect",
+    "manager",
+    "head of",
+    "intern", "internship", "co-op", "co op",
+    "fellowship",
 ]
 
-LOCATION_KEYWORDS = ["us", "usa", "united states", "u.s."]
+# Location INCLUDE and EXCLUDE lists
+LOCATION_INCLUDE = [
+    " us", " usa", " u.s.", " united states",
+    "(us)", "(usa)",
+    "remote us", "remote-us", "remote in the us", "remote in usa",
+    "anywhere in the us", "us only",
+    "hybrid", "hybrid-us", "hybrid us",
+    "onsite", "on-site", "in office", "in-office",
+]
+
+LOCATION_EXCLUDE = [
+    "canada", "toronto", "vancouver",
+    "europe", " eu ", "emea",
+    "united kingdom", "uk", "london",
+    "india", "bangalore", "bengaluru", "hyderabad", "gurgaon", "mumbai", "pune",
+    "mexico", "latam", "latin america",
+    "australia", "sydney", "melbourne",
+    "singapore", "hong kong", "china",
+    "worldwide", "global",
+    "remote global", "remote worldwide",
+]
 
 
 # -------------------------------
@@ -45,59 +80,81 @@ LOCATION_KEYWORDS = ["us", "usa", "united states", "u.s."]
 # -------------------------------
 def load_companies():
     print("[INFO] Loading companies.json...")
-    with open("config/companies.json") as f:
+    with open("config/companies.json", encoding="utf-8") as f:
         data = json.load(f)
     print(f"[INFO] Loaded {len(data)} companies.")
     return data
 
 
 # -------------------------------
-# FILTER BY POSTING AGE (15 MIN)
+# FILTER BY POSTING AGE (30 MIN)
 # -------------------------------
-def posted_within(job, minutes=15):
+def posted_within(job, minutes=30):
+    """
+    Accepts job dict with `created_at` / `updated_at` (ISO8601 strings).
+    Returns True if within the last `minutes`.
+    """
     updated = job.get("updated_at")
     created = job.get("created_at")
 
     timestamp = updated or created
     if not timestamp:
-        return False
+        return False  # no timestamp => ignore
 
     try:
-        job_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-    except:
+        dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except Exception:
         return False
 
     now = datetime.now(timezone.utc)
-    diff_minutes = (now - job_time).total_seconds() / 60
-
-    return diff_minutes <= minutes
+    diff_min = (now - dt).total_seconds() / 60.0
+    return diff_min <= minutes
 
 
 # -------------------------------
 # JOB FILTER CHECK
 # -------------------------------
 def job_matches(job):
-    text = (job.get("title", "") + " " + job.get("description", "")).lower()
-    loc = job.get("location", "").lower()
+    title = job.get("title", "") or ""
+    desc = job.get("description", "") or ""
+    loc = job.get("location", "") or ""
 
-    # ❌ Exclude internships, senior roles
+    text = (title + " " + desc).lower()
+    loc_low = loc.lower()
+
+    # 1) Exclude clearly senior / non-junior / intern roles
     if any(bad in text for bad in EXCLUDE_KEYWORDS):
         return False
 
-    # ✔ Role match
-    if not any(role in text for role in TARGET_ROLES):
-        return False
-
-    # ✔ Experience level match
+    # 2) Require at least one junior / early-career signal
     if not any(exp in text for exp in EXPERIENCE_KEYWORDS):
         return False
 
-    # ✔ US-based
-    if not any(loc_kw in loc for loc_kw in LOCATION_KEYWORDS):
+    # 3) Require target role keywords
+    if not any(role in text for role in TARGET_ROLES):
         return False
 
-    # ✔ Posted recently (15 min)
-    if not posted_within(job, minutes=15):
+    # 4) Location must NOT contain non-US markers
+    if any(bad in loc_low for bad in LOCATION_EXCLUDE):
+        return False
+
+    # 5) Location must look like US / US-remote / US-hybrid / onsite US
+    if not any(ok in loc_low for ok in LOCATION_INCLUDE):
+        # As a fallback, accept locations that explicitly mention US states
+        us_states = [
+            "california", "ca", "new york", "ny",
+            "texas", "tx", "washington", "wa",
+            "massachusetts", "ma", "virginia", "va",
+            "colorado", "co", "illinois", "il",
+            "georgia", "ga", "north carolina", "nc",
+            "ohio", "oh", "arizona", "az",
+            "florida", "fl", "pennsylvania", "pa",
+        ]
+        if not any(state in loc_low for state in us_states):
+            return False
+
+    # 6) Must be posted within last 30 minutes
+    if not posted_within(job, minutes=30):
         return False
 
     return True
@@ -107,12 +164,12 @@ def job_matches(job):
 # UNIQUE JOB HASH
 # -------------------------------
 def job_id(company, job):
-    base = f"{company}|{job['title']}|{job['url']}"
-    return hashlib.md5(base.encode()).hexdigest()
+    base = f"{company}|{job.get('title','')}|{job.get('url','')}"
+    return hashlib.md5(base.encode(), usedforsecurity=False).hexdigest()
 
 
 # -------------------------------
-# EMAIL SENDER
+# EMAIL SENDER (uses env/Secrets)
 # -------------------------------
 def send_email(new_jobs):
     import smtplib
@@ -122,22 +179,50 @@ def send_email(new_jobs):
         print("[INFO] No new jobs found — not sending email.")
         return
 
+    email_address = os.environ.get("EMAIL_ADDRESS")
+    email_password = os.environ.get("EMAIL_PASSWORD")
+
+    if not email_address or not email_password:
+        print(
+            "[WARN] EMAIL_ADDRESS or EMAIL_PASSWORD not set — "
+            "skipping email send. Jobs will be printed instead."
+        )
+        for j in new_jobs:
+            print(f"JOB: {j['title']} — {j['company']} — {j['location']} | {j['url']}")
+        return
+
     print(f"[INFO] Sending email with {len(new_jobs)} new jobs...")
 
-    body = ""
+    lines = []
     for j in new_jobs:
-        body += f"{j['title']} — {j['company']}\n{j['url']}\n\n"
+        lines.append(f"{j['title']} — {j['company']} — {j['location']}")
+        lines.append(j["url"])
+        lines.append("")
+    body = "\n".join(lines)
 
     msg = MIMEText(body)
-    msg["Subject"] = f"{len(new_jobs)} New Jobs Found (Last 15 Minutes)"
-    msg["From"] = "somaharsha71@gmail.com"
-    msg["To"] = "somaharsha71@gmail.com"
+    msg["Subject"] = f"{len(new_jobs)} New Junior Jobs (Last 30 Minutes)"
+    msg["From"] = email_address
+    msg["To"] = email_address
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login("somaharsha71@gmail.com", "xzrs dgan dgdh noke")
+        server.login(email_address, email_password)
         server.send_message(msg)
 
     print("[INFO] Email sent successfully.")
+
+
+# -------------------------------
+# FIRESTORE (optional)
+# -------------------------------
+def get_firestore_client():
+    try:
+        db = firestore.Client()
+        print("[INFO] Firestore ENABLED.")
+        return db
+    except Exception as e:
+        print(f"[INFO] Firestore DISABLED — running in dev mode. Reason: {e}")
+        return None
 
 
 # -------------------------------
@@ -146,17 +231,10 @@ def send_email(new_jobs):
 def main(request=None):
     print("\n======== JOB ALERT AGENT STARTED ========\n")
 
-    # Firestore optional (disabled if no ADC)
-    try:
-        db = firestore.Client()
-        print("[INFO] Firestore ENABLED.")
-    except Exception as e:
-        print(f"[INFO] Firestore DISABLED — running in dev mode. Reason: {e}")
-        db = None
-
+    db = get_firestore_client()
     companies = load_companies()
-    seen = set()
 
+    seen = set()
     if db:
         seen = {doc.id for doc in db.collection("jobs_seen").stream()}
 
@@ -164,7 +242,6 @@ def main(request=None):
 
     new_jobs = []
 
-    # Fetch jobs for each company
     for company in companies:
         name = company["name"]
         ats = company["ats"]
@@ -194,14 +271,14 @@ def main(request=None):
 
             record = {
                 "company": name,
-                "title": job["title"],
-                "location": job["location"],
-                "url": job["url"]
+                "title": job.get("title", ""),
+                "location": job.get("location", ""),
+                "url": job.get("url", ""),
             }
 
             if db:
                 db.collection("jobs_seen").document(jid).set(record)
-
+            seen.add(jid)
             new_jobs.append(record)
 
         print(f"[INFO] {name}: {len(new_jobs)} total new jobs accumulated so far.")
@@ -213,6 +290,5 @@ def main(request=None):
     return "OK"
 
 
-# Run main
 if __name__ == "__main__":
     main()
