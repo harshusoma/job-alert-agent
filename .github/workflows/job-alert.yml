@@ -28,7 +28,11 @@ jobs:
           echo "=== PWD ==="
           pwd
           echo "=== LIST FILES ==="
-          ls -R .
+          ls
+          echo "./config:"
+          ls config
+          echo "./scrapers:"
+          ls scrapers
 
       - name: Run job alert agent
         env:
@@ -36,4 +40,4 @@ jobs:
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
         run: |
           echo "=== RUNNING main.py NOW ==="
-          python ./main.py
+          python main.py

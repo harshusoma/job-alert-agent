@@ -1,47 +1,40 @@
 import requests
-from bs4 import BeautifulSoup
 
 
-def fetch_greenhouse_jobs(company, url):
-    jobs = []
+def _extract_board_token(url: str) -> str:
+    """
+    For URLs like:
+      - https://boards.greenhouse.io/databricks
+      - https://boards.greenhouse.io/databricks/
+    return "databricks".
+    """
+    return url.rstrip("/").split("/")[-1]
+
+
+def fetch_greenhouse_jobs(company: str, careers_url: str):
+    jobs: list[dict] = []
+    board_token = _extract_board_token(careers_url)
+    api_url = f"https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs?content=true"
 
     try:
-        resp = requests.get(url, timeout=15)
+        resp = requests.get(api_url, timeout=15)
         resp.raise_for_status()
+        data = resp.json()
+        raw_jobs = data.get("jobs", [])
+        print(f"[GREENHOUSE] API returned {len(raw_jobs)} jobs for {company}")
 
-        soup = BeautifulSoup(resp.text, "html.parser")
-
-        # Typical Greenhouse structure: div.opening > a + span.location
-        postings = soup.select("div.opening")
-
-        print(f"[GREENHOUSE] Found {len(postings)} raw postings for {company}")
-
-        for post in postings:
-            link_el = post.select_one("a")
-            if not link_el:
-                continue
-
-            title = link_el.text.strip()
-            href = link_el.get("href", "")
-
-            # Some boards use relative links like "/databricks/job/123..."
-            if href.startswith("http"):
-                job_url = href
-            else:
-                job_url = "https://boards.greenhouse.io" + href
-
-            loc_el = post.select_one(".location")
-            location = loc_el.text.strip() if loc_el else "Not specified"
-
-            jobs.append({
-                "title": title,
-                "company": company,
-                "location": location,
-                "url": job_url,
-                "description": ""
-            })
+        for j in raw_jobs:
+            jobs.append(
+                {
+                    "title": j.get("title", ""),
+                    "company": company,
+                    "location": j.get("location", {}).get("name", ""),
+                    "url": j.get("absolute_url", ""),
+                    "description": j.get("content", "") or "",
+                }
+            )
 
     except Exception as e:
-        print(f"[ERROR] Greenhouse scraper failed for {company}: {e}")
+        print(f"Error:  Greenhouse API failed for {company}: {e}")
 
     return jobs

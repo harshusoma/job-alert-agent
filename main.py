@@ -1,15 +1,13 @@
+import os
 import json
 import hashlib
-from google.cloud import firestore
 
-from scrapers.greenhouse import fetch_greenhouse_jobs
-from scrapers.lever import fetch_lever_jobs
-from scrapers.workday import fetch_workday_jobs
+try:
+    from google.cloud import firestore  # type: ignore
+except Exception:
+    firestore = None  # type: ignore
 
 
-# -------------------------------
-# FILTERING CONFIG
-# -------------------------------
 TARGET_ROLES = [
     "software engineer",
     "ml engineer",
@@ -19,54 +17,48 @@ TARGET_ROLES = [
     "data engineer",
     "security engineer",
     "cybersecurity",
-    "security analyst"
+    "security analyst",
 ]
 
 EXPERIENCE_KEYWORDS = [
-    "0-2 years", "0–2 years", "0 to 2 years",
-    "entry level", "new grad", "graduate", "junior"
+    "0-2 years",
+    "0–2 years",
+    "0 to 2 years",
+    "entry level",
+    "new grad",
+    "graduate",
+    "junior",
 ]
 
 LOCATION_KEYWORDS = ["us", "usa", "united states", "u.s."]
 
 
-# -------------------------------
-# LOAD COMPANIES
-# -------------------------------
-def load_companies():
+def load_companies() -> list[dict]:
     print("[INFO] Loading companies.json...")
-    with open("config/companies.json") as f:
+    with open("config/companies.json", encoding="utf-8") as f:
         data = json.load(f)
     print(f"[INFO] Loaded {len(data)} companies.")
     return data
 
 
-# -------------------------------
-# JOB FILTER CHECK
-# -------------------------------
-def job_matches(job):
+def job_matches(job: dict) -> bool:
     text = (job.get("title", "") + " " + job.get("description", "")).lower()
     loc = job.get("location", "").lower()
 
     return (
-        any(role in text for role in TARGET_ROLES) and
-        any(exp in text for exp in EXPERIENCE_KEYWORDS) and
-        any(loc_kw in loc for loc_kw in LOCATION_KEYWORDS)
+        any(role in text for role in TARGET_ROLES)
+        and any(exp in text for exp in EXPERIENCE_KEYWORDS)
+        and any(loc_kw in loc for loc_kw in LOCATION_KEYWORDS)
     )
 
 
-# -------------------------------
-# UNIQUE JOB HASH
-# -------------------------------
-def job_id(company, job):
-    base = f"{company}|{job['title']}|{job['url']}"
-    return hashlib.md5(base.encode()).hexdigest()
+def job_id(company: str, job: dict) -> str:
+    base = f"{company}|{job.get('title','')}|{job.get('url','')}"
+    # usedforsecurity=False avoids an OpenSSL warning on some platforms
+    return hashlib.md5(base.encode(), usedforsecurity=False).hexdigest()
 
 
-# -------------------------------
-# EMAIL SENDER
-# -------------------------------
-def send_email(new_jobs):
+def send_email(new_jobs: list[dict]) -> None:
     import smtplib
     from email.mime.text import MIMEText
 
@@ -74,37 +66,78 @@ def send_email(new_jobs):
         print("[INFO] No new jobs found — not sending email.")
         return
 
+    # READ FROM GITHUB SECRETS / ENV, NOT HARDCODED
+    email_address = os.environ.get("EMAIL_ADDRESS")
+    email_password = os.environ.get("EMAIL_PASSWORD")
+
+    if not email_address or not email_password:
+        print(
+            "[WARN] EMAIL_ADDRESS or EMAIL_PASSWORD not set — "
+            "skipping email send. Jobs will still be logged."
+        )
+        for j in new_jobs:
+            print(f"JOB: {j['title']} — {j['company']} | {j['url']}")
+        return
+
     print(f"[INFO] Sending email with {len(new_jobs)} new jobs...")
 
-    body = ""
+    lines = []
     for j in new_jobs:
-        body += f"{j['title']} — {j['company']}\n{j['url']}\n\n"
+        lines.append(f"{j['title']} — {j['company']}")
+        lines.append(j["url"])
+        lines.append("")
+    body = "\n".join(lines)
 
     msg = MIMEText(body)
     msg["Subject"] = f"{len(new_jobs)} New Jobs Found"
-    msg["From"] = "somaharsha71@gmail.com"
-    msg["To"] = "somaharsha71@gmail.com"
+    msg["From"] = email_address
+    msg["To"] = email_address
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login("somaharsha71@gmail.com", "xzrs dgan dgdh noke")
+        server.login(email_address, email_password)
         server.send_message(msg)
 
     print("[INFO] Email sent successfully.")
 
 
-# -------------------------------
-# MAIN (DEV MODE — Firestore disabled)
-# -------------------------------
-def main(request=None):
+def get_firestore_client():
+    """Return (db, use_firestore_flag)."""
+    if firestore is None:
+        print("[INFO] google.cloud.firestore not installed — dev mode.")
+        return None, False
+
+    try:
+        db = firestore.Client()
+        print("[INFO] Firestore ENABLED — using real database.")
+        return db, True
+    except Exception as e:
+        print(
+            "[INFO] Firestore DISABLED — running in development mode. "
+            f"Reason: {e}"
+        )
+        return None, False
+
+
+def main(_request=None) -> str:
     print("\n======== JOB ALERT AGENT STARTED ========\n")
 
-    # 🔥 DEV MODE: Firestore disabled to avoid authentication failure
-    print("[INFO] Firestore DISABLED — running in development mode.")
-    db = None
-    seen = set()  # no previous job caching
+    db, use_firestore = get_firestore_client()
 
     companies = load_companies()
-    new_jobs = []
+
+    if use_firestore:
+        seen_ids = {doc.id for doc in db.collection("jobs_seen").stream()}
+    else:
+        seen_ids = set()
+
+    print(f"[INFO] Loaded {len(seen_ids)} previously seen job IDs.\n")
+
+    # Imported here so that scrapers can be edited without circular issues
+    from scrapers.greenhouse import fetch_greenhouse_jobs
+    from scrapers.lever import fetch_lever_jobs
+    from scrapers.workday import fetch_workday_jobs
+
+    new_jobs: list[dict] = []
 
     for company in companies:
         name = company["name"]
@@ -113,7 +146,6 @@ def main(request=None):
 
         print(f"\n[INFO] Fetching jobs for: {name} ({ats})")
 
-        # Select scraper
         if ats == "greenhouse":
             jobs = fetch_greenhouse_jobs(name, url)
         elif ats == "lever":
@@ -131,19 +163,19 @@ def main(request=None):
                 continue
 
             jid = job_id(name, job)
-            if jid in seen:
+            if jid in seen_ids:
                 continue
 
             record = {
                 "company": name,
-                "title": job["title"],
-                "location": job["location"],
-                "url": job["url"]
+                "title": job.get("title", ""),
+                "location": job.get("location", ""),
+                "url": job.get("url", ""),
             }
 
-            # 🔥 DEV MODE: Firestore write disabled
-            print(f"[DEBUG] (DEV MODE) Would save job to Firestore: {jid}")
-
+            if use_firestore:
+                db.collection("jobs_seen").document(jid).set(record)
+            seen_ids.add(jid)
             new_jobs.append(record)
 
         print(f"[INFO] {name}: {len(new_jobs)} total new jobs accumulated so far.")
@@ -157,4 +189,3 @@ def main(request=None):
 
 if __name__ == "__main__":
     main()
-
