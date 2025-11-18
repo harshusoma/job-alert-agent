@@ -1,77 +1,96 @@
+import os
 import json
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
 from google.cloud import firestore
+from google.auth.exceptions import DefaultCredentialsError
 
 from scrapers.greenhouse import fetch_greenhouse_jobs
-from scrapers.lever import fetch_lever_jobs
 from scrapers.workday import fetch_workday_jobs
-from scrapers.ashby import fetch_ashby_jobs
 
 
-# ================================
-# FILTERS CONFIG (PHASE 2.1)
-# ================================
-
-TARGET_ROLES = [
+# -----------------------------------
+# FILTERING CONFIG
+# -----------------------------------
+ROLE_KEYWORDS = [
     "software engineer",
     "swe",
     "ml engineer",
     "machine learning engineer",
     "ai engineer",
+    "ai/ml engineer",
     "data scientist",
+    "data science",
     "data engineer",
     "security engineer",
     "cybersecurity",
     "security analyst",
+    "application security",
+    "cloud security",
+    "site reliability engineer",
+    "sre",
+    "platform engineer"
 ]
 
-ENTRY_KEYWORDS = [
+LEVEL_KEYWORDS = [
     "entry level",
     "new grad",
+    "new graduate",
     "graduate",
     "junior",
     "early career",
     "associate",
-    "assistant",
+    "assistant"
 ]
 
-ENTRY_TITLE_MARKERS = [
-    "engineer i",
-    "engineer 1",
-    "software engineer i",
-    "software engineer 1",
-    "data engineer i",
-    "data engineer 1",
-    "ml engineer i",
-    "ml engineer 1",
-    "security engineer i",
-    "security engineer 1",
-]
-
-SENIOR_EXCLUDE = [
+EXCLUDE_KEYWORDS = [
+    "intern",
+    "internship",
+    "intern -",
+    "intern,",
     "senior",
-    "staff",
+    "sr.",
     "sr ",
+    "staff",
     "principal",
-    "lead",
+    "lead ",
     "manager",
     "director",
-    "head of",
     "vp ",
+    "vice president",
+    "iii",
+    "iv",
+    "v "
 ]
 
 LOCATION_KEYWORDS = [
-    "us", "usa", "u.s.", "united states",
-    "remote", "remote-us", "remote us",
-    "anywhere in the us", "us only",
-    "hybrid", "hybrid-us",
+    "us",
+    "usa",
+    "u.s.",
+    "united states",
+    "remote-us",
+    "remote us",
+    "remote (us)",
+    "anywhere in the us",
+    "across the us",
+    "within the united states",
+    "hybrid",
+    "onsite",
+    "on-site"
 ]
 
+# Time window idea (future when we have reliable timestamps)
+FRESH_MINUTES = 30  # for now we rely on "seen" + scheduler, not timestamps
 
-# ================================
-# LOAD COMPANIES
-# ================================
+
+# -----------------------------------
+# HELPERS
+# -----------------------------------
+def _norm(text: str) -> str:
+    return (text or "").lower()
+
+
 def load_companies():
     print("[INFO] Loading companies.json...")
     with open("config/companies.json") as f:
@@ -80,142 +99,127 @@ def load_companies():
     return data
 
 
-# ================================
-# TIMESTAMP NORMALIZATION
-# ================================
-def normalize_ts(raw):
-    if not raw:
-        return None
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except Exception:
-        return None
+def job_matches(job: dict) -> bool:
+    title = _norm(job.get("title"))
+    desc = _norm(job.get("description"))
+    loc = _norm(job.get("location"))
+    combined = f"{title} {desc}"
 
-
-def posted_within_window(job, hours=24):
-    """
-    PHASE 2.1:
-    Treat missing timestamps as fresh.
-    Window = 24 hours for testing.
-    """
-    ts = normalize_ts(job.get("updated_at")) or normalize_ts(job.get("created_at"))
-    if ts is None:
-        return True  # assume new
-    return datetime.utcnow() - ts < timedelta(hours=hours)
-
-
-# ================================
-# FILTERING LOGIC
-# ================================
-def job_matches(job):
-    title = job.get("title", "").lower()
-    desc = job.get("description", "").lower()
-    text = f"{title} {desc}"
-    loc = job.get("location", "").lower()
-
-    # Debug reasons
-    if not any(r in text for r in TARGET_ROLES):
-        print(f"[FILTER] Reject (role): {job.get('title')}")
+    # 1) Must match one of your target roles
+    if not any(key in combined for key in ROLE_KEYWORDS):
         return False
 
-    if any(s in title for s in SENIOR_EXCLUDE):
-        print(f"[FILTER] Reject (senior): {job.get('title')}")
+    # 2) Must look like early-career / junior
+    if not any(key in combined for key in LEVEL_KEYWORDS):
         return False
 
-    # Entry-level detection
-    entry_match = (
-        any(exp in text for exp in ENTRY_KEYWORDS) or
-        any(marker in title for marker in ENTRY_TITLE_MARKERS)
-    )
-    if not entry_match:
-        print(f"[FILTER] Reject (not entry-level): {job.get('title')}")
+    # 3) Exclude senior / intern / manager etc.
+    if any(key in combined for key in EXCLUDE_KEYWORDS):
         return False
 
-    # Location
-    if not any(loc_kw in loc for loc_kw in LOCATION_KEYWORDS):
-        print(f"[FILTER] Reject (location): {job.get('title')} | {loc}")
-        return False
-
-    # Freshness
-    if not posted_within_window(job, hours=24):
-        print(f"[FILTER] Reject (too old): {job.get('title')}")
+    # 4) Location must look like US / remote-US / hybrid US
+    if LOCATION_KEYWORDS and not any(key in loc for key in LOCATION_KEYWORDS):
         return False
 
     return True
 
 
-# ================================
-# UNIQUE JOB HASH
-# ================================
-def job_id(company, job):
-    base = f"{company}|{job['title']}|{job['url']}"
+def job_id(company: str, job: dict) -> str:
+    base = f"{company}|{job.get('title','')}|{job.get('url','')}"
     return hashlib.md5(base.encode()).hexdigest()
 
 
-# ================================
-# EMAIL SENDER
-# ================================
+def get_firestore_client():
+    try:
+        client = firestore.Client()
+        print("[INFO] Firestore ENABLED — using jobs_seen collection.")
+        return client
+    except DefaultCredentialsError as e:
+        print(
+            "[INFO] Firestore DISABLED — running in dev mode. "
+            f"Reason: {e}"
+        )
+        return None
+    except Exception as e:
+        print(
+            "[INFO] Firestore DISABLED — unexpected error, running in dev mode. "
+            f"Reason: {e}"
+        )
+        return None
+
+
 def send_email(new_jobs):
     import smtplib
-    from email.mime.text import MIMEText
+    from email.mime_text import MIMEText
 
     if not new_jobs:
-        print("[INFO] No new jobs found — skipping email.")
+        print("[INFO] No new jobs — skipping email.")
         return
 
-    print(f"[INFO] Sending email with {len(new_jobs)} jobs...")
+    email_address = os.environ.get("EMAIL_ADDRESS", "").strip()
+    email_password = os.environ.get("EMAIL_PASSWORD", "").strip()
 
-    body = ""
+    if not email_address or not email_password:
+        print(
+            "[WARN] EMAIL_ADDRESS or EMAIL_PASSWORD env variable is missing. "
+            "Cannot send email."
+        )
+        return
+
+    print(f"[INFO] Sending email with {len(new_jobs)} new jobs to {email_address}...")
+
+    lines = []
     for j in new_jobs:
-        body += f"{j['title']} — {j['company']}\n{j['url']}\n\n"
+        lines.append(f"{j['title']} — {j['company']}")
+        lines.append(j["url"])
+        loc = j.get("location")
+        if loc:
+            lines.append(f"Location: {loc}")
+        lines.append("")  # blank line between jobs
+
+    body = "\n".join(lines)
 
     msg = MIMEText(body)
     msg["Subject"] = f"{len(new_jobs)} New Jobs Found"
-    msg["From"] = "somaharsha71@gmail.com"
-    msg["To"] = "somaharsha71@gmail.com"
+    msg["From"] = email_address
+    msg["To"] = email_address
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login("somaharsha71@gmail.com", "xzrs dgan dgdh noke")
+        server.login(email_address, email_password)
         server.send_message(msg)
 
     print("[INFO] Email sent successfully.")
 
 
-# ================================
-# MAIN
-# ================================
 def main(request=None):
     print("\n======== JOB ALERT AGENT STARTED ========\n")
 
-    # Firestore handling
-    try:
-        db = firestore.Client()
-    except Exception as e:
-        print(f"[INFO] Firestore DISABLED — using dev mode. Reason: {e}")
-        db = None
-
+    db = get_firestore_client()
     companies = load_companies()
-    seen = set()
+
+    if db:
+        seen_ids = {doc.id for doc in db.collection("jobs_seen").stream()}
+        print(f"[INFO] Loaded {len(seen_ids)} previously seen job IDs.\n")
+    else:
+        seen_ids = set()
+        print("[INFO] Dev mode: not loading seen IDs (no Firestore).\n")
 
     new_jobs = []
 
-    for company in companies:
-        name = company["name"]
-        ats = company["ats"]
-        url = company["careers_url"]
+    for company_cfg in companies:
+        name = company_cfg["name"]
+        ats = company_cfg["ats"]
+        url = company_cfg["careers_url"]
 
         print(f"\n[INFO] Fetching jobs for: {name} ({ats})")
 
+        # Dispatch to appropriate scraper
         if ats == "greenhouse":
             jobs = fetch_greenhouse_jobs(name, url)
-        elif ats == "lever":
-            jobs = fetch_lever_jobs(name, url)
         elif ats == "workday":
             jobs = fetch_workday_jobs(name, url)
-        elif ats == "ashby":
-            jobs = fetch_ashby_jobs(name, url)
         else:
-            print(f"[WARN] Unsupported ATS: {ats}")
+            print(f"[WARN] Unsupported ATS '{ats}' for {name}, skipping.")
             jobs = []
 
         print(f"[INFO] {name}: scraper returned {len(jobs)} raw jobs.")
@@ -225,16 +229,20 @@ def main(request=None):
                 continue
 
             jid = job_id(name, job)
-            if jid in seen:
+            if jid in seen_ids:
                 continue
 
-            seen.add(jid)
-            new_jobs.append({
+            record = {
                 "company": name,
-                "title": job["title"],
-                "location": job["location"],
-                "url": job["url"],
-            })
+                "title": job.get("title", ""),
+                "location": job.get("location", ""),
+                "url": job.get("url", "")
+            }
+
+            if db:
+                db.collection("jobs_seen").document(jid).set(record)
+
+            new_jobs.append(record)
 
         print(f"[INFO] {name}: {len(new_jobs)} total new jobs accumulated so far.")
 
@@ -243,3 +251,7 @@ def main(request=None):
 
     print("\n======== JOB ALERT AGENT FINISHED ========\n")
     return "OK"
+
+
+if __name__ == "__main__":
+    main()

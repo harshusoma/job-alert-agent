@@ -5,14 +5,16 @@ from urllib.parse import urljoin
 
 def fetch_workday_jobs(company: str, careers_url: str):
     """
-    Best-effort HTML scraper for Workday career pages.
+    Best-effort HTML scraper for Workday / custom career pages.
 
-    It tries to:
-      - fetch the careers_url
-      - find job title links (data-automation-id="jobTitle" or similar)
-      - extract title, location, and URL
     Returns a list of dicts:
-      { "title": str, "location": str, "url": str, "description": str }
+      {
+        "title": str,
+        "location": str,
+        "url": str,
+        "description": str,
+        "posted_at": None  # we don't reliably get timestamps yet
+      }
     """
     print(f"[INFO] Workday scraper starting for {company}: {careers_url}")
 
@@ -34,7 +36,7 @@ def fetch_workday_jobs(company: str, careers_url: str):
 
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    # --- Strategy 1: common Workday markup with data-automation-id="jobTitle"
+    # Strategy 1: Common Workday markup with data-automation-id="jobTitle"
     title_links = soup.find_all("a", attrs={"data-automation-id": "jobTitle"})
     if not title_links:
         # Some tenants use slightly different IDs
@@ -44,7 +46,7 @@ def fetch_workday_jobs(company: str, careers_url: str):
             if title_links:
                 break
 
-    # If still nothing, try a heuristic fallback: links that look like jobs
+    # Strategy 2: Heuristic fallback — links whose href looks like a job posting
     if not title_links:
         possible = []
         for a in soup.find_all("a", href=True):
@@ -73,15 +75,16 @@ def fetch_workday_jobs(company: str, careers_url: str):
         # Try to find a nearby location element
         location = ""
         try:
-            # Look at some parent containers for location fields
             parent = a
-            for _ in range(4):  # go up a few levels max
+            for _ in range(4):  # walk up a few levels max
                 if not parent:
                     break
-                # Common Workday patterns
-                loc_tag = parent.find(attrs={"data-automation-id": "jobLocation"}) \
-                          or parent.find(attrs={"data-automation-id": "secondaryLocation"}) \
-                          or parent.find(attrs={"data-automation-id": "locations"})
+
+                loc_tag = (
+                    parent.find(attrs={"data-automation-id": "jobLocation"})
+                    or parent.find(attrs={"data-automation-id": "secondaryLocation"})
+                    or parent.find(attrs={"data-automation-id": "locations"})
+                )
 
                 if loc_tag:
                     location = loc_tag.get_text(strip=True)
@@ -93,9 +96,10 @@ def fetch_workday_jobs(company: str, careers_url: str):
 
         job = {
             "title": title,
-            "location": location,
+            "location": location or "",
             "url": url,
-            "description": ""
+            "description": "",
+            "posted_at": None
         }
         jobs.append(job)
 
