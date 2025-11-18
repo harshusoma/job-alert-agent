@@ -6,8 +6,10 @@ from datetime import datetime, timedelta, timezone
 from google.cloud import firestore
 from google.auth.exceptions import DefaultCredentialsError
 
+# --- SCRAPERS ---
 from scrapers.greenhouse import fetch_greenhouse_jobs
-from scrapers.workday import fetch_workday_jobs
+from scrapers.lever import scrape as scrape_lever
+# from scrapers.workday import fetch_workday_jobs   # DISABLED by your request
 
 
 # -----------------------------------
@@ -80,9 +82,6 @@ LOCATION_KEYWORDS = [
     "on-site"
 ]
 
-# Time window idea (future when we have reliable timestamps)
-FRESH_MINUTES = 30  # for now we rely on "seen" + scheduler, not timestamps
-
 
 # -----------------------------------
 # HELPERS
@@ -105,19 +104,19 @@ def job_matches(job: dict) -> bool:
     loc = _norm(job.get("location"))
     combined = f"{title} {desc}"
 
-    # 1) Must match one of your target roles
+    # 1) ROLE match
     if not any(key in combined for key in ROLE_KEYWORDS):
         return False
 
-    # 2) Must look like early-career / junior
+    # 2) LEVEL match
     if not any(key in combined for key in LEVEL_KEYWORDS):
         return False
 
-    # 3) Exclude senior / intern / manager etc.
+    # 3) EXCLUSIONS
     if any(key in combined for key in EXCLUDE_KEYWORDS):
         return False
 
-    # 4) Location must look like US / remote-US / hybrid US
+    # 4) US-only locations
     if LOCATION_KEYWORDS and not any(key in loc for key in LOCATION_KEYWORDS):
         return False
 
@@ -175,7 +174,7 @@ def send_email(new_jobs):
         loc = j.get("location")
         if loc:
             lines.append(f"Location: {loc}")
-        lines.append("")  # blank line between jobs
+        lines.append("")  # blank line
 
     body = "\n".join(lines)
 
@@ -191,6 +190,9 @@ def send_email(new_jobs):
     print("[INFO] Email sent successfully.")
 
 
+# -----------------------------------
+# MAIN LOGIC
+# -----------------------------------
 def main(request=None):
     print("\n======== JOB ALERT AGENT STARTED ========\n")
 
@@ -213,17 +215,24 @@ def main(request=None):
 
         print(f"\n[INFO] Fetching jobs for: {name} ({ats})")
 
-        # Dispatch to appropriate scraper
+        # Dispatch scraper
         if ats == "greenhouse":
             jobs = fetch_greenhouse_jobs(name, url)
-        elif ats == "workday":
-            jobs = fetch_workday_jobs(name, url)
+
+        elif ats == "lever":
+            jobs = scrape_lever(name, url)
+
+        # Workday disabled (you requested removal)
+        # elif ats == "workday":
+        #     jobs = fetch_workday_jobs(name, url)
+
         else:
             print(f"[WARN] Unsupported ATS '{ats}' for {name}, skipping.")
             jobs = []
 
         print(f"[INFO] {name}: scraper returned {len(jobs)} raw jobs.")
 
+        # Filtering
         for job in jobs:
             if not job_matches(job):
                 continue

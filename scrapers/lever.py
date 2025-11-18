@@ -1,59 +1,88 @@
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+KEYWORDS_FLEXIBLE = [
+    "software", "swe", "developer", "engineer", "backend", "full stack",
+    "full-stack", "python", "java", "ml", "machine learning", "data",
+    "security", "ai", "artificial intelligence", "research engineer",
+    "applied scientist"
+]
+
+USA_KEYWORDS = ["united states", "usa", "us", "remote - us", "remote-us"]
 
 
-def fetch_lever_jobs(company: str, careers_url: str):
+def normalize(text: str):
+    return text.lower().strip() if text else ""
+
+
+def is_recent(created_at_iso: str, minutes=30):
+    """Check if job was posted in last X minutes."""
+    try:
+        posted = datetime.fromisoformat(created_at_iso.replace("Z", "+00:00"))
+        return datetime.now(timezone.utc) - posted <= timedelta(minutes=minutes)
+    except:
+        return False
+
+
+def matches_flexible_keywords(title: str):
+    title = normalize(title)
+    return any(kw in title for kw in KEYWORDS_FLEXIBLE)
+
+
+def is_usa(location: str):
+    if not location:
+        return False
+    loc = normalize(location)
+    return any(kw in loc for kw in USA_KEYWORDS)
+
+
+def scrape(company_name, careers_url):
     """
-    careers_url can be:
-    - a full Lever API URL
-      e.g. https://api.lever.co/v0/postings/rippling?mode=json
-    - OR just the Lever account slug, e.g. "rippling"
+    Example: https://jobs.lever.co/scaleai
+    API:     https://api.lever.co/v0/postings/scaleai?mode=json
     """
-    if careers_url.startswith("http"):
-        api_url = careers_url
-        if "mode=" not in api_url:
-            # ensure JSON mode
-            sep = "&" if "?" in api_url else "?"
-            api_url = f"{api_url}{sep}mode=json"
-    else:
-        # assume account slug
-        api_url = f"https://api.lever.co/v0/postings/{careers_url}?mode=json"
 
     try:
-        resp = requests.get(api_url, timeout=15)
+        board = careers_url.rstrip("/").split("/")[-1]
+        api_url = f"https://api.lever.co/v0/postings/{board}?mode=json"
+
+        resp = requests.get(api_url, timeout=20)
         resp.raise_for_status()
-        jobs_raw = resp.json()
+        data = resp.json()
     except Exception as e:
-        print(f"[ERROR] Lever API failed for {company}: {e}")
+        print(f"[LEVER] Error fetching {company_name}: {e}")
         return []
 
-    print(f"[LEVER] API returned {len(jobs_raw)} jobs for {company}")
+    results = []
 
-    jobs = []
-    for j in jobs_raw:
-        title = j.get("text", {}).get("title", "") or j.get("title", "")
-        location = j.get("categories", {}).get("location", "") or ""
-        description = j.get("descriptionPlain", "") or j.get("description", "") or ""
-        url = j.get("hostedUrl") or j.get("applyUrl") or ""
+    for job in data:
+        title = job.get("text", "")
+        location = job.get("categories", {}).get("location", "")
+        created = job.get("createdAt")
 
-        # createdAt in ms since epoch
-        created_ms = j.get("createdAt")
-        posted_at = None
-        if isinstance(created_ms, (int, float)):
-            posted_at = datetime.fromtimestamp(created_ms / 1000.0, tz=timezone.utc)
+        if not created:
+            continue
 
-        employment_type = (j.get("categories", {}).get("commitment") or "").lower()
-        # e.g. "intern", "full-time", etc.
+        created_iso = datetime.utcfromtimestamp(created / 1000).isoformat() + "Z"
 
-        jobs.append(
-            {
-                "title": title,
-                "location": location,
-                "description": description,
-                "url": url,
-                "employment_type": employment_type,
-                "posted_at": posted_at,
-            }
-        )
+        # FILTERS
+        if not is_recent(created_iso, minutes=30):
+            continue
 
-    return jobs
+        if not matches_flexible_keywords(title):
+            continue
+
+        if not is_usa(location):
+            continue
+
+        results.append({
+            "id": job.get("id"),
+            "title": title,
+            "company": company_name,
+            "location": location,
+            "url": job.get("hostedUrl"),
+            "created_at": created_iso
+        })
+
+    print(f"[LEVER] {company_name}: {len(results)} filtered jobs")
+    return results
