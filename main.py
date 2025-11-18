@@ -150,7 +150,7 @@ def get_firestore_client():
 
 def send_email(new_jobs):
     import smtplib
-    from email.mime_text import MIMEText
+    from email.mime.text import MIMEText
 
     if not new_jobs:
         print("[INFO] No new jobs — skipping email.")
